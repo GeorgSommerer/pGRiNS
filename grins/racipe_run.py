@@ -392,6 +392,8 @@ def topo_simulate(
     -------
     pd.DataFrame
         DataFrame containing the solutions of the ODE system.
+    jnp.ndarray
+        A 2D array where each row represents a combination of an initial condition and a parameter. The first column contains indices of initial conditions, and the second column contains indices of parameters.
     """
     # Get the name of the topo file
     topo_name = topo_file.split("/")[-1].split(".")[0]
@@ -446,6 +448,7 @@ def topo_simulate(
     parameters = jnp.array(parameters.to_numpy())
     # Get the combinations of initial conditions and parameters
     icprm_comb = _gen_combinations(len(initial_conditions), len(parameters))
+    
     print(f"Number of combinations to simulate: {len(icprm_comb)}")
     # Processing the time steps
     if tsteps is None:
@@ -547,7 +550,7 @@ def topo_simulate(
         # solution_matrix.to_parquet(
         #     f"{replicate_dir}/{topo_name}_timeseries_solutions.parquet", index=False
         # )
-    return solution_matrix
+    return solution_matrix, icprm_comb
 
 
 # Function to run all the replicate simulations for a given topo file
@@ -655,7 +658,7 @@ def run_all_replicates(
         # Starting the timer
         start_time = time.time()
         # Run the simulation for the specified topo file and given initial conditions and parameters
-        sol_df = topo_simulate(
+        sol_df, icprm_comb = topo_simulate(
             topo_file=topo_file,
             replicate_dir=replicate_dir,
             initial_conditions=init_conds,
@@ -692,6 +695,10 @@ def run_all_replicates(
             )
         else:
             pass
+        icprm_df = pd.DataFrame(icprm_comb,columns=["ic_index","param_index"])
+        display(icprm_comb)
+        display(sol_df)
+        sol_df = pd.concat([sol_df,icprm_df],axis=1)
         # Check if the time seires is given or not to name the solution file
         if tsteps is None:
             # Save the solution dataframe

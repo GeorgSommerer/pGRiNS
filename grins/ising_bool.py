@@ -222,6 +222,7 @@ def sync_eval_next_state(
 @jit
 def simulate_sync_trajectory(
     initial_condition,
+    ic_index,
     topo_adj,
     replacement_values,
     max_steps,
@@ -233,6 +234,8 @@ def simulate_sync_trajectory(
     ----------
     initial_condition : jnp.ndarray
         The initial state of the system.
+    ic_index : int
+        The index of the current initial condition.
     topo_adj : jnp.ndarray
         The topology adjacency matrix representing the connections between nodes in the system.
     replacement_values : jnp.ndarray
@@ -243,7 +246,7 @@ def simulate_sync_trajectory(
     Returns
     -------
     jnp.ndarray
-        A JAX array containing the states of the system at each step, with the initial condition included at the beginning. The array also includes a column for the step indices. All -1 values in the states are replaced with 0 if the replacement values are [-1, 1].
+        A JAX array containing the states of the system at certain steps, with the initial condition included at the beginning. The array also includes a column for the step indices. All -1 values in the states are replaced with 0 if the replacement values are [-1, 1].
     """
 
     # Initialize states array
@@ -255,18 +258,22 @@ def simulate_sync_trajectory(
             replacement_values,
         )
         return next_state, next_state
-
     # Run the simulation loop
     _, states = lax.scan(step_fn, initial_condition, xs=max_steps)
     # Add the initial condition to the states at the beginning
     states = jnp.concatenate((jnp.expand_dims(initial_condition, axis=0), states))
+    # Add column for IC vals
+    states = jnp.hstack((jnp.repeat(ic_index,states.shape[0]).reshape(-1,1),states))
     # Add a column for the steps
     states = jnp.hstack((jnp.arange(states.shape[0]).reshape(-1, 1), states))
     # Make sure that states are a jax array
     states = jnp.array(states, dtype=jnp.int16)
     # For the results where the replacement values are -1 and 1, some nodes will have -1 values, but for all purposes those should be considered as 0 values, so turning all -1 values to 0
     states = jnp.where(states == -1, 0, states)
-    return states
+
+    returned_states = jnp.vstack((states[:1,:],states[-1:,:])) # Determine which states should be returned; here, the initial conditions & end states are returned
+
+    return returned_states
 
 
 @jit
@@ -316,6 +323,7 @@ def async_eval_next_state(
 @jit
 def simulate_async_trajectory(
     initial_condition,
+    ic_index,
     topo_adj,
     replacement_values,
     update_indices,  # Vector of indices specifying which node to update at each step
@@ -327,6 +335,8 @@ def simulate_async_trajectory(
     ----------
     initial_condition : jnp.ndarray
         The initial condition of the system.
+    ic_index : int
+        The index of the current initial condition.
     topo_adj : jnp.ndarray
         The adjacency matrix representing the topology of the system.
     replacement_values : jnp.ndarray
@@ -353,20 +363,25 @@ def simulate_async_trajectory(
     _, states = lax.scan(step_fn, initial_condition, xs=update_indices)
     # Add the initial condition to the states at the beginning
     states = jnp.concatenate((jnp.expand_dims(initial_condition, axis=0), states))
+    # Add column for IC vals
+    states = jnp.hstack((jnp.repeat(ic_index,states.shape[0]).reshape(-1,1),states))
     # Add a column for the steps
     states = jnp.hstack((jnp.arange(states.shape[0]).reshape(-1, 1), states))
     # Make sure that states are the right dtype
     states = jnp.array(states, dtype=jnp.int16)
     # For the results where the replacement values are -1 and 1, some nodes will have -1 values, but for all purposes those should be considered as 0 values, so turning all -1 values to 0
     states = jnp.where(states == -1, 0, states)
-    return states
+
+    returned_states = jnp.vstack((states[:1,:],states[-1:,:])) # Determine which states should be returned; here, the initial conditions & end states are returned
+
+    return returned_states
 
 
 # Function to pack the 0/1 states into bits
 @jit
 def packbit_states(states):
     states = jnp.concatenate(
-        [states[:, 0:1], jnp.packbits(states[:, 1:], axis=1)], axis=1
+        [states[:, 0:2], jnp.packbits(states[:, 1:], axis=1)], axis=1
     )
     return states
 
@@ -516,12 +531,12 @@ def run_ising(
         )
     # Initialize an empty numpy array to store the results
     if not packbits:
-        results_array = np.empty((0, len(node_names) + 1), dtype=np.int16)
+        results_array = np.empty((0, len(node_names) + 2), dtype=np.int16)
         # Create the column names for the dataframe
         df_cols = ["Step"] + node_names
     else:
         results_array = np.empty(
-            (0, int(np.ceil(len(node_names) / 8)) + 1), dtype=np.int16
+            (0, int(np.ceil(len(node_names) / 8)) + 2), dtype=np.int16
         )
         #### OLD Behaviour ####
         ## # Create the column names for the dataframe
@@ -533,7 +548,7 @@ def run_ising(
         ## with open(f"{save_dir}/{topo_name}_{mode}_node_names_order.csv", "w") as f:
         ##     f.write(",".join(node_names))
         ######
-        df_cols = ["Step"] + [
+        df_cols = ["Step"] + ["Initnum"] + [
             "|".join(node_names[i : i + 8]) for i in range(0, len(node_names), 8)
         ]
     # Start the simulation timer
@@ -543,15 +558,17 @@ def run_ising(
         # Run synchronous simulations in batches
         for batch in range(0, num_initial_conditions, batch_size):
             batch_initial_conditions = initial_conditions[batch : batch + batch_size]
+            batch_ic_indices = jnp.arange(start=batch,stop=min([batch+batch_size,len(initial_conditions)]))
             batch_results = vmap(
-                lambda x: simulate_sync_trajectory(
+                lambda x,z: simulate_sync_trajectory(
                     x,
+                    z,
                     topo_adj,
                     replacement_values,
                     jnp.arange(max_steps),
                 ),
                 in_axes=0,
-            )(batch_initial_conditions)
+            )(batch_initial_conditions,batch_ic_indices)
             # Stack the batch results into a single array
             batch_results = jnp.vstack(batch_results)
             # If packbits is True, pack the 0/1 states into bits to reduce memory usage
@@ -570,15 +587,17 @@ def run_ising(
         for batch in range(0, num_initial_conditions, batch_size):
             batch_initial_conditions = initial_conditions[batch : batch + batch_size]
             batch_update_indices = update_indices_matrix[:, batch : batch + batch_size]
+            batch_ic_indices = jnp.arange(start=batch,stop=min([batch+batch_size,len(initial_conditions)]))
             batch_states = vmap(
-                lambda x, y: simulate_async_trajectory(
+                lambda x, y, z: simulate_async_trajectory(
                     x,
+                    z,
                     topo_adj,
                     replacement_values,
                     y,
                 ),
-                in_axes=(0, 1),
-            )(batch_initial_conditions, batch_update_indices)
+                in_axes=(0, 1, 0),
+            )(batch_initial_conditions, batch_update_indices, batch_ic_indices)
             # Stack the batch results into a single array
             batch_states = jnp.vstack(batch_states)
             # If packbits is True, pack the 0/1 states into bits to reduce memory usage
